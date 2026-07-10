@@ -417,8 +417,19 @@ const PAPERS = {
   Letter:  [216,  279],  Tabloid: [279, 432],
 };
 
-// 1 mm → px (96 dpi)
-const MM2PX = 96 / 25.4;
+// ─── Compute real CSS-px per mm ───────────────────────────────────────────────
+// Strategy: create an off-screen element sized in mm, measure its pixel size.
+// This correctly handles every browser/OS/DPI combination without guessing DPI.
+function computeMM2PX() {
+  const el = document.createElement('div');
+  el.style.cssText = 'position:absolute;width:100mm;height:0;visibility:hidden;pointer-events:none';
+  document.body.appendChild(el);
+  const px = el.getBoundingClientRect().width;
+  document.body.removeChild(el);
+  // px is now the CSS pixel width of 100mm → divide by 100
+  return px / 100;
+}
+const MM2PX = computeMM2PX();
 // margin around paper in world-coords
 const MARGIN = 80;
 
@@ -711,45 +722,78 @@ window.addEventListener('mouseup', () => {
 });
 
 function launchInertia(vx, vy) {
-  if (Math.hypot(vx, vy) < 0.5) return;
+  if (Math.hypot(vx, vy) < 0.3) return;
+  // friction: 0.95 feels natural on mobile (iOS Maps-like), stops in ~0.8s at typical flick speeds
+  const FRICTION = 0.95;
   let ax = vx, ay = vy;
-  function step() {
-    ax *= 0.90; ay *= 0.90;
+  let lastT = null;
+  function step(ts) {
+    // Frame-rate independent decay: apply friction per elapsed ms
+    // At 60fps one frame ≈ 16.67ms; friction^1 = 0.95 per frame
+    if (lastT !== null) {
+      const dt    = Math.min(ts - lastT, 64); // cap at 64ms to avoid jump after tab switch
+      const frames = dt / (1000 / 60);
+      const decay  = Math.pow(FRICTION, frames);
+      ax *= decay; ay *= decay;
+    }
+    lastT = ts;
     offX -= ax; offY -= ay;
     clamp(); applyTransform();
-    if (Math.hypot(ax, ay) > 0.15) inertiaID = requestAnimationFrame(step);
+    if (Math.hypot(ax, ay) > 0.08) inertiaID = requestAnimationFrame(step);
   }
   inertiaID = requestAnimationFrame(step);
 }
 
 // ─── Touch pan & flick ────────────────────────────────────────────────────────
+// Ring buffer: store recent touch points with timestamps for accurate velocity
+const TOUCH_BUF_MS = 80; // look back window (ms)
 let touchSX = 0, touchSY = 0;
 let touchOffX = 0, touchOffY = 0;
-let touchLastX = 0, touchLastY = 0;
-let touchVX = 0, touchVY = 0;
+let touchHistory = []; // [{x, y, t}, ...]
 
 viewport.addEventListener('touchstart', e => {
   const t = e.touches[0];
-  touchSX = t.clientX; touchSY = t.clientY;
-  touchOffX = offX;    touchOffY = offY;
-  touchLastX = t.clientX; touchLastY = t.clientY;
-  touchVX = 0; touchVY = 0;
+  touchSX    = t.clientX;
+  touchSY    = t.clientY;
+  touchOffX  = offX;
+  touchOffY  = offY;
+  touchHistory = [{ x: t.clientX, y: t.clientY, t: e.timeStamp }];
   cancelAnimationFrame(inertiaID);
 }, { passive: true });
 
 viewport.addEventListener('touchmove', e => {
   e.preventDefault();
-  const t = e.touches[0];
-  touchVX = t.clientX - touchLastX;
-  touchVY = t.clientY - touchLastY;
-  touchLastX = t.clientX; touchLastY = t.clientY;
+  const t   = e.touches[0];
+  const now = e.timeStamp;
+
+  // Append to history, prune old entries
+  touchHistory.push({ x: t.clientX, y: t.clientY, t: now });
+  const cutoff = now - TOUCH_BUF_MS;
+  while (touchHistory.length > 2 && touchHistory[0].t < cutoff) {
+    touchHistory.shift();
+  }
+
   offX = touchOffX - (t.clientX - touchSX);
   offY = touchOffY - (t.clientY - touchSY);
   clamp(); applyTransform(); showScrollbars();
 }, { passive: false });
 
-viewport.addEventListener('touchend', () => {
-  launchInertia(-touchVX, -touchVY);
+viewport.addEventListener('touchend', e => {
+  // Compute velocity from ring buffer: (last - oldest) / elapsed_ms * 16.67ms/frame
+  let vx = 0, vy = 0;
+  if (touchHistory.length >= 2) {
+    const first = touchHistory[0];
+    const last  = touchHistory[touchHistory.length - 1];
+    const dt    = last.t - first.t;
+    if (dt > 0) {
+      // px per ms → px per frame (at 60fps)
+      const mspf = 1000 / 60;
+      vx = ((last.x - first.x) / dt) * mspf;
+      vy = ((last.y - first.y) / dt) * mspf;
+    }
+  }
+  touchHistory = [];
+  launchInertia(-vx, -vy);
 });
 
 // ─── Keyboard ─────────────────────────────────────────────────────────────────
