@@ -575,8 +575,8 @@ sizeSel.addEventListener('change', async () => {
     return;
   }
   const [mmW, mmH] = PAPERS[paperKey];
-  paperW = mmW * MM2PX;
-  paperH = mmH * MM2PX;
+  paperH = mmW * MM2PX * 2;
+  paperW = mmH * MM2PX;
 
   siSize.classList.add('on');
   siSizeTxt.textContent = `${paperKey}  ${mmW}×${mmH} mm`;
